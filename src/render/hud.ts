@@ -119,7 +119,11 @@ export class Hud {
     if (current === this.lastAmmoCurrent && reserve === this.lastAmmoReserve) return;
     this.lastAmmoCurrent = current;
     this.lastAmmoReserve = reserve;
-    this.ammoEl.textContent = `${current} / ${reserve}`;
+    // A non-finite reserve means practice mode: show the infinity glyph rather
+    // than a meaningless number, and drop the reserve half entirely.
+    this.ammoEl.textContent = Number.isFinite(reserve)
+      ? `${current} / ${reserve}`
+      : '\u221e';
   }
 
   setTargetHealth(health: number, maxHealth: number, armor: number, maxArmor: number): void {

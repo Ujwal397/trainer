@@ -35,6 +35,8 @@ export interface SessionDeps {
   crosshair: Crosshair;
   input: RawInput;
   seed?: number;
+  /** Practice mode: magazine never empties, reloads unnecessary. */
+  infiniteAmmo?: boolean;
 }
 
 /** Scratch objects reused every step — the hot path must not allocate. */
@@ -63,6 +65,8 @@ export class TrainingSession {
    * blaming the curve and blaming the base sensitivity.
    */
   private lastEffectiveGain = 1;
+  private shotsFired = 0;
+  private hitsLanded = 0;
   /** Targets we have already told the recorder became visible. */
   private readonly notedVisible = new Set<string>();
   /** Targets already shot at once, so time-to-target is only the first shot. */
@@ -74,6 +78,7 @@ export class TrainingSession {
     this.runtime = new ScenarioRuntime(deps.scenario, deps.env, this.rng);
     this.move = new MoveState({ ...deps.env.playerSpawn });
     this.weapon = new WeaponState(deps.weapon);
+    this.weapon.infiniteAmmo = deps.infiniteAmmo ?? true;
 
     this.unsubscribe.push(deps.input.onDelta((delta) => this.onMouse(delta)));
     this.unsubscribe.push(deps.input.onButtonDown((b) => { if (b === 0) this.tryFire(); }));
@@ -94,6 +99,16 @@ export class TrainingSession {
   }
 
   get isFinished(): boolean { return this.finished; }
+  /** Live run state for the pause overlay. Cheap enough to call on demand. */
+  get stats(): { score: number; remainingSec: number; accuracy: number; shots: number } {
+    return {
+      score: this.runtime.score,
+      remainingSec: this.remainingSec,
+      accuracy: this.shotsFired > 0 ? this.hitsLanded / this.shotsFired : 0,
+      shots: this.shotsFired,
+    };
+  }
+
   /** Current view angles, degrees. */
   get orientation(): { yaw: number; pitch: number } { return { yaw: this.aim.yaw, pitch: this.aim.pitch }; }
   /** Points the view directly, bypassing the mouse pipeline. Used to recentre
@@ -230,6 +245,9 @@ export class TrainingSession {
       if (h && (!hit || h.distanceM < hit.distanceM)) { hit = h; hitTarget = t; }
     }
 
+    this.shotsFired++;
+    if (hit) this.hitsLanded++;
+
     let killed = false;
     let scoreDelta = 0;
     const scoring = this.d.scenario.scoring;
@@ -307,7 +325,10 @@ export class TrainingSession {
     this.d.renderer.setCameraOrientation(this.aim.yaw, this.aim.pitch, eye);
     this.d.targets.sync(this.runtime.targets, alpha);
 
-    this.d.hud.setAmmo(this.weapon.ammo, this.weapon.reserve);
+    this.d.hud.setAmmo(
+      this.weapon.ammo,
+      this.weapon.infiniteAmmo ? Infinity : this.weapon.reserve,
+    );
     this.d.hud.setTimer(this.remainingSec);
     this.d.hud.setScore(Math.round(this.runtime.score));
     this.d.hud.setStreak(this.streak);

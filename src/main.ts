@@ -29,6 +29,7 @@ import { TrainingSession } from './game/session';
 import { createMenuScreen } from './ui/menu';
 import { createSettingsScreen, type CrosshairConfig as UiCrosshair, type VideoConfig } from './ui/settings';
 import { createResultsScreen } from './ui/results';
+import { createPauseOverlay, type PauseOverlayHandle } from './ui/pause';
 import { createAnalyzerScreen, type TrackData } from './ui/analyzer';
 import type { ScreenHandle } from './ui/menu';
 
@@ -49,7 +50,7 @@ const DEFAULT_SENS: SensConfig = {
   },
 };
 
-const DEFAULT_VIDEO: VideoConfig = { targetVisualMode: 'humanoid', fpsCap: 0, showFps: true };
+const DEFAULT_VIDEO: VideoConfig = { targetVisualMode: 'humanoid', infiniteAmmo: true, fpsCap: 0, showFps: true };
 
 const KEY_SENS = 'sens';
 const KEY_CROSSHAIR = 'crosshair';
@@ -130,6 +131,8 @@ class App {
   private activeProfileId: string | null = null;
   private abSlots: [string | null, string | null] = [null, null];
   private lastPlayed: { scenarioId: string; weaponId: string } | null = null;
+  private currentScenarioId: string | null = null;
+  private currentWeaponId: string | null = null;
 
   private screen: ScreenHandle | null = null;
   private loop: GameLoop | null = null;
@@ -137,6 +140,10 @@ class App {
   private targetPool: TargetPool | null = null;
   private hud: Hud | null = null;
   private crosshair: Crosshair | null = null;
+  private pause: PauseOverlayHandle | null = null;
+  private runHost: HTMLElement | null = null;
+  /** Set while quitting, so the lock-change handler does not re-open the menu. */
+  private tearingDown = false;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -279,6 +286,8 @@ class App {
     const scenario = getScenario(scenarioId);
     const weapon = getWeapon(weaponId);
     this.lastPlayed = { scenarioId, weaponId };
+    this.currentScenarioId = scenarioId;
+    this.currentWeaponId = weaponId;
     await this.db.setSetting(KEY_LAST_PLAYED, this.lastPlayed);
 
     this.screen?.destroy();
@@ -312,10 +321,23 @@ class App {
       hud: this.hud,
       crosshair: this.crosshair,
       input: this.input,
+      infiniteAmmo: this.video.infiniteAmmo,
     });
 
     this.session.start();
-    void this.input.requestLock?.();
+    this.runHost = host;
+
+    this.pause = createPauseOverlay({
+      scenario,
+      weapon,
+      stats: () => this.session?.stats ?? { score: 0, remainingSec: 0, accuracy: 0, shots: 0 },
+      onResume: () => void this.input.requestLock(),
+      onRestart: () => void this.restartRun(),
+      onSettings: () => { this.quitRun(); void this.showSettings(); },
+      onQuit: () => { this.quitRun(); void this.showMenu(); },
+    });
+
+    void this.input.requestLock();
 
     this.loop = new GameLoop({
       onFixedStep: (dtSec) => {
@@ -331,11 +353,59 @@ class App {
     document.addEventListener('pointerlockchange', this.onLockChange);
   }
 
+  /**
+   * Pointer lock is the pause signal: Escape releases it, and so does
+   * alt-tabbing or the window losing focus. Treating all of those the same way
+   * means a run is never silently ticking down while the player is elsewhere.
+   */
   private readonly onLockChange = (): void => {
-    if (!this.loop || !this.session) return;
-    if (document.pointerLockElement === null) this.loop.pause();
-    else this.loop.resume();
+    if (this.tearingDown || !this.loop || !this.session || !this.pause) return;
+
+    if (document.pointerLockElement === null) {
+      this.loop.pause();
+      this.pause.refresh();
+      this.runHost?.appendChild(this.pause.el);
+    } else {
+      this.pause.el.remove();
+      this.loop.resume();
+    }
   };
+
+  private async restartRun(): Promise<void> {
+    const scenarioId = this.currentScenarioId;
+    const weaponId = this.currentWeaponId;
+    this.quitRun();
+    if (scenarioId && weaponId) await this.startRun(scenarioId, weaponId);
+  }
+
+  /**
+   * Abandons the run without saving. A partial session would be a short,
+   * unrepresentative sample, and the analyser weights by shot count — letting
+   * abandoned runs into the store would quietly bias every recommendation.
+   */
+  private quitRun(): void {
+    this.tearingDown = true;
+    this.loop?.stop();
+    document.removeEventListener('pointerlockchange', this.onLockChange);
+    this.input.release();
+    this.pause?.destroy();
+    this.pause = null;
+    this.session?.dispose();
+    this.session = null;
+    this.loop = null;
+    this.teardownRunVisuals();
+    this.tearingDown = false;
+  }
+
+  private teardownRunVisuals(): void {
+    this.targetPool?.dispose();
+    this.targetPool = null;
+    this.hud?.dispose();
+    this.hud = null;
+    this.crosshair?.dispose();
+    this.crosshair = null;
+    this.runHost = null;
+  }
 
   private async endRun(): Promise<void> {
     if (!this.session) return;
@@ -345,6 +415,8 @@ class App {
     this.loop?.stop();
     document.removeEventListener('pointerlockchange', this.onLockChange);
     this.input.release();
+    this.pause?.destroy();
+    this.pause = null;
     this.session.dispose();
     this.session = null;
     this.loop = null;
@@ -360,12 +432,7 @@ class App {
       console.error('Failed to save session', err);
     }
 
-    this.targetPool?.dispose();
-    this.targetPool = null;
-    this.hud?.dispose();
-    this.hud = null;
-    this.crosshair?.dispose();
-    this.crosshair = null;
+    this.teardownRunVisuals();
 
     this.setScreen(createResultsScreen({
       session: record,

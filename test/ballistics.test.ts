@@ -171,3 +171,52 @@ describe('applyRecoilAndSpread', () => {
     expect(out.y).toBeGreaterThan(0);
   });
 });
+
+describe('practice mode ammo', () => {
+  it('never depletes the magazine and ignores reloads', () => {
+    const spec = getWeapon('vandal');
+    const w = new WeaponState(spec);
+    w.infiniteAmmo = true;
+    w.equip(0);
+    const rng = new Rng(1);
+
+    let now = spec.equipTimeMs;
+    // Half a millisecond past the exact interval: accumulating a float and
+    // subtracting it back can land a hair BELOW the threshold, and the real
+    // loop polls on 4ms steps rather than on the exact boundary anyway.
+    const interval = 1000 / spec.fireRate + 0.5;
+    // Fire well past the 25-round magazine.
+    for (let i = 0; i < 60; i++) {
+      w.update(now, 0);
+      expect(w.fire(now, rng)).not.toBeNull();
+      now += interval;
+    }
+    expect(w.ammo).toBe(spec.magazine);
+
+    // A reload request is a no-op rather than a lockout — otherwise a reflexive
+    // R press mid-session would stall practice for the reload duration.
+    w.reload(now);
+    expect(w.reloading).toBe(false);
+    expect(w.canFire(now)).toBe(true);
+  });
+
+  it('still runs the recoil pattern normally, so spray discipline transfers', () => {
+    const spec = getWeapon('vandal');
+    const w = new WeaponState(spec);
+    w.infiniteAmmo = true;
+    w.equip(0);
+    const rng = new Rng(2);
+
+    let now = spec.equipTimeMs;
+    const interval = 1000 / spec.fireRate + 0.5;
+    const first = w.fire(now, rng);
+    now += interval;
+    w.update(now, 0);
+    const second = w.fire(now, rng);
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    // The pattern advanced: shot two is not the same offset as shot one.
+    expect(second!.recoil.y).not.toBeCloseTo(first!.recoil.y, 6);
+  });
+});

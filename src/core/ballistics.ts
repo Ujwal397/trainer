@@ -94,6 +94,13 @@ export class WeaponState {
   currentRecoil: Vec2 = { x: 0, y: 0 };
   reloading = false;
   scoped = false;
+  /**
+   * Practice mode: the magazine never empties and reloads are unnecessary.
+   * Recoil and spread still behave exactly as normal — only the ammo counter
+   * is bypassed, so spray discipline is unaffected and what you learn here
+   * still transfers.
+   */
+  infiniteAmmo = false;
   scopeLevel = 0;
 
   private reloadEndsAt = -Infinity;
@@ -125,7 +132,7 @@ export class WeaponState {
 
   canFire(now: number): boolean {
     if (this.reloading) return false;
-    if (this.ammo <= 0) return false;
+    if (this.ammo <= 0 && !this.infiniteAmmo) return false;
     if (now - this.equippedAt < this.spec.equipTimeMs) return false;
 
     const interval = 1000 / this.spec.fireRate;
@@ -152,7 +159,7 @@ export class WeaponState {
     if (!this.canFire(now)) return null;
 
     const spec = this.spec;
-    this.ammo -= 1;
+    if (!this.infiniteAmmo) this.ammo -= 1;
     this.lastShotTime = now;
 
     if (spec.fireMode === 'semi') {
@@ -237,6 +244,7 @@ export class WeaponState {
   }
 
   reload(now: number): void {
+    if (this.infiniteAmmo) return;
     if (this.reloading || this.ammo >= this.spec.magazine || this.reserve <= 0) return;
     this.reloading = true;
     this.reloadEndsAt = now + this.spec.reloadTimeMs;

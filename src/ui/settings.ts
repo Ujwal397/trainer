@@ -51,6 +51,8 @@ export type TargetVisualMode = 'humanoid' | 'capsule' | 'hitbox-wireframe';
 
 export interface VideoConfig {
   targetVisualMode: TargetVisualMode;
+  /** Practice mode: the magazine never empties and reloads are unnecessary. */
+  infiniteAmmo: boolean;
   /** 0 = uncapped. */
   fpsCap: number;
   showFps: boolean;
@@ -633,10 +635,13 @@ export function createSettingsScreen(deps: SettingsScreenDeps): ScreenHandle {
     const fpsField = numberField({ id: 'vid-fpscap', label: 'FPS Cap (0 = uncapped)', value: workingVideo.fpsCap, min: 0, max: 360, step: 1 }, (v) => {
       workingVideo.fpsCap = v; commitVideo();
     });
+    const infiniteAmmoField = toggleField({ id: 'vid-infammo', label: 'Infinite Ammo (no reloads)', value: workingVideo.infiniteAmmo }, (v) => {
+      workingVideo.infiniteAmmo = v; commitVideo();
+    });
     const showFpsField = toggleField({ id: 'vid-showfps', label: 'Show FPS Counter', value: workingVideo.showFps }, (v) => {
       workingVideo.showFps = v; commitVideo();
     });
-    cleanup.push(modeField.destroy, fpsField.destroy, showFpsField.destroy);
+    cleanup.push(modeField.destroy, fpsField.destroy, showFpsField.destroy, infiniteAmmoField.destroy);
 
     const section = el('div', { class: 'settings-section' },
       el('div', { class: 'panel' },
@@ -646,7 +651,7 @@ export function createSettingsScreen(deps: SettingsScreenDeps): ScreenHandle {
           el('span', {}, 'Horizontal FOV'),
           el('span', { class: 'fov-readout-value' }, `${DEFAULT_HFOV_DEG.value}°`),
           el('span', { class: 'text-faint' }, '— fixed. Valorant does not allow FOV changes, so neither does this trainer.')),
-        fpsField.el, showFpsField.el));
+        fpsField.el, infiniteAmmoField.el, showFpsField.el));
 
     return { el: section, destroy: () => { for (const fn of cleanup) fn(); } };
   }
