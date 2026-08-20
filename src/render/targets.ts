@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import type { AgentHitbox, Capsule, HitZone, TargetState, Vec3 } from '../core/types';
 import { CROUCH_SCALE, SIM_STEP_MS, STANDING_HITBOX } from '../core/constants';
 import { add, distance, scale as scaleVec } from '../core/math';
+import { buildHumanoidGeometries, type HumanoidZoneGeometries } from './botMesh';
 
 export type VisualMode = 'humanoid' | 'capsule' | 'wireframe';
 
@@ -49,20 +50,40 @@ function findCapsule(zone: HitZone, hitbox: AgentHitbox): Capsule {
   return cap;
 }
 
-/** Builds a CapsuleGeometry whose radius/length are derived from the hitbox capsule, not eyeballed. */
+function zoneMidY(cap: Capsule): number {
+  return scaleVec(add(cap.a, cap.b), 0.5).y;
+}
+
+/**
+ * Builds a CapsuleGeometry whose radius/length are derived from the hitbox
+ * capsule, not eyeballed, and bakes its zone-mid-Y offset directly into the
+ * geometry (rather than leaving that to the mesh's `.position`). That way
+ * every zone mesh can sit at `position.y = 0` permanently and this geometry
+ * is a drop-in swap for the humanoid geometry built in `botMesh.ts`, which
+ * is authored in the same absolute (feet-at-0) space — see `applyMode`.
+ *
+ * Also carries a uniform WHITE per-vertex colour. `makeZoneMaterial` below
+ * turns on `vertexColors` (required so the humanoid geometry's baked-in
+ * per-part colours render at all), and a MeshStandardMaterial multiplies
+ * vertex colour into its base colour. White is the multiplicative identity,
+ * so with this geometry `material.color` alone still determines the final
+ * colour, exactly as before vertex colours existed — 'capsule' and
+ * 'wireframe' modes are visually unchanged.
+ */
 function buildZoneGeometry(cap: Capsule): THREE.CapsuleGeometry {
   const length = distance(cap.a, cap.b);
   // Low radial segment count reads as clean/faceted (flat-shaded) rather than smooth-rounded plastic.
-  return new THREE.CapsuleGeometry(cap.radius, length, 3, 8);
-}
-
-function zoneMidY(cap: Capsule): number {
-  return scaleVec(add(cap.a, cap.b), 0.5).y;
+  const geom = new THREE.CapsuleGeometry(cap.radius, length, 3, 8);
+  geom.translate(0, zoneMidY(cap), 0);
+  const count = geom.attributes.position.count;
+  geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(count * 3).fill(1), 3));
+  return geom;
 }
 
 function makeZoneMaterial(): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({
     flatShading: true,
+    vertexColors: true,
     roughness: 0.85,
     metalness: 0,
     emissive: 0xffffff,
@@ -76,7 +97,6 @@ interface Slot {
   headMesh: THREE.Mesh;
   bodyMesh: THREE.Mesh;
   legMesh: THREE.Mesh;
-  shoulderMesh: THREE.Mesh;
   headMat: THREE.MeshStandardMaterial;
   bodyMat: THREE.MeshStandardMaterial;
   legMat: THREE.MeshStandardMaterial;
@@ -100,16 +120,18 @@ export class TargetPool {
   private mode: VisualMode = 'humanoid';
 
   // Shared geometry: identical dimensions for every target, so every slot's
-  // meshes for a zone reuse the SAME BufferGeometry instance.
+  // meshes for a zone reuse the SAME BufferGeometry instance. Two variants
+  // per zone — the plain capsule (used by 'capsule'/'wireframe' modes) and
+  // the articulated humanoid mesh (used by 'humanoid' mode) — and
+  // `applyMode` below just points each slot's mesh at whichever one is
+  // current. Building ~800 per-part meshes (25 parts x 32 slots) instead of
+  // merging them would multiply the pool's draw-call count by nearly 30x;
+  // see the top of `botMesh.ts` for the full rationale.
   private readonly headGeom: THREE.CapsuleGeometry;
   private readonly bodyGeom: THREE.CapsuleGeometry;
   private readonly legGeom: THREE.CapsuleGeometry;
-  private readonly shoulderGeom: THREE.BoxGeometry;
+  private readonly humanoidGeom: HumanoidZoneGeometries;
   private readonly markerGeom: THREE.SphereGeometry;
-
-  private readonly headMidY: number;
-  private readonly bodyMidY: number;
-  private readonly legMidY: number;
 
   constructor(scene: THREE.Scene, poolSize: number = TARGET_POOL_SIZE) {
     this.scene = scene;
@@ -121,19 +143,12 @@ export class TargetPool {
     this.headGeom = buildZoneGeometry(headCap);
     this.bodyGeom = buildZoneGeometry(bodyCap);
     this.legGeom = buildZoneGeometry(legCap);
-    this.headMidY = zoneMidY(headCap);
-    this.bodyMidY = zoneMidY(bodyCap);
-    this.legMidY = zoneMidY(legCap);
-
-    // Shoulders are a purely cosmetic 'humanoid' embellishment, sized off the
-    // body capsule's own radius so they never contradict the real hitbox.
-    const bodyTopY = Math.max(bodyCap.a.y, bodyCap.b.y);
-    this.shoulderGeom = new THREE.BoxGeometry(bodyCap.radius * 2.3, bodyCap.radius * 0.55, bodyCap.radius * 1.1);
+    this.humanoidGeom = buildHumanoidGeometries(headCap, bodyCap, legCap);
 
     this.markerGeom = new THREE.SphereGeometry(0.035, 6, 6);
 
     for (let i = 0; i < poolSize; i++) {
-      this.slots.push(this.buildSlot(bodyTopY));
+      this.slots.push(this.buildSlot());
     }
     for (let i = 0; i < MARKER_POOL_SIZE; i++) {
       this.markers.push(this.buildMarker());
@@ -146,25 +161,21 @@ export class TargetPool {
     this.applyMode();
   }
 
-  private buildSlot(bodyTopY: number): Slot {
+  private buildSlot(): Slot {
     const headMat = makeZoneMaterial();
     const bodyMat = makeZoneMaterial();
     const legMat = makeZoneMaterial();
 
+    // Both the plain-capsule and humanoid geometries are baked in absolute
+    // (feet-at-y=0) space (see `buildZoneGeometry`/`botMesh.ts`), so the
+    // mesh itself never needs repositioning — `applyMode` swaps `.geometry`
+    // in place when the visual mode changes.
     const headMesh = new THREE.Mesh(this.headGeom, headMat);
-    headMesh.position.y = this.headMidY;
     const bodyMesh = new THREE.Mesh(this.bodyGeom, bodyMat);
-    bodyMesh.position.y = this.bodyMidY;
     const legMesh = new THREE.Mesh(this.legGeom, legMat);
-    legMesh.position.y = this.legMidY;
-
-    // Shoulders share the body material so a body-zone hit flash reads across
-    // the whole torso silhouette instead of looking split.
-    const shoulderMesh = new THREE.Mesh(this.shoulderGeom, bodyMat);
-    shoulderMesh.position.y = bodyTopY;
 
     const group = new THREE.Group();
-    group.add(headMesh, bodyMesh, legMesh, shoulderMesh);
+    group.add(headMesh, bodyMesh, legMesh);
     group.visible = false;
 
     return {
@@ -173,7 +184,6 @@ export class TargetPool {
       headMesh,
       bodyMesh,
       legMesh,
-      shoulderMesh,
       headMat,
       bodyMat,
       legMat,
@@ -199,17 +209,26 @@ export class TargetPool {
   }
 
   private applyMode(): void {
+    const humanoid = this.mode === 'humanoid';
     const palette = MODE_COLOR[this.mode];
     const wire = this.mode === 'wireframe';
     for (const slot of this.slots) {
-      slot.headMat.color.setHex(palette.head);
-      slot.bodyMat.color.setHex(palette.body);
-      slot.legMat.color.setHex(palette.leg);
+      slot.headMesh.geometry = humanoid ? this.humanoidGeom.head : this.headGeom;
+      slot.bodyMesh.geometry = humanoid ? this.humanoidGeom.body : this.bodyGeom;
+      slot.legMesh.geometry = humanoid ? this.humanoidGeom.leg : this.legGeom;
+      // In 'humanoid' mode the per-part colour is baked into the geometry's
+      // vertex colours (see `botMesh.ts`); leaving material.color at white
+      // means it multiplies as the identity and those colours show through
+      // unmodified. In 'capsule'/'wireframe' the plain geometry's vertex
+      // colours are uniformly white (see `buildZoneGeometry`), so the
+      // palette tint below is once again the only thing that matters —
+      // both modes are pixel-for-pixel unchanged from before vertex colours.
+      slot.headMat.color.setHex(humanoid ? 0xffffff : palette.head);
+      slot.bodyMat.color.setHex(humanoid ? 0xffffff : palette.body);
+      slot.legMat.color.setHex(humanoid ? 0xffffff : palette.leg);
       slot.headMat.wireframe = wire;
       slot.bodyMat.wireframe = wire;
       slot.legMat.wireframe = wire;
-      // Shoulders only make sense as a stylised-agent embellishment.
-      slot.shoulderMesh.visible = this.mode === 'humanoid';
     }
   }
 
@@ -343,7 +362,9 @@ export class TargetPool {
     this.headGeom.dispose();
     this.bodyGeom.dispose();
     this.legGeom.dispose();
-    this.shoulderGeom.dispose();
+    this.humanoidGeom.head.dispose();
+    this.humanoidGeom.body.dispose();
+    this.humanoidGeom.leg.dispose();
     this.markerGeom.dispose();
     this.slots.length = 0;
     this.markers.length = 0;
