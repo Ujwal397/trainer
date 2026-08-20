@@ -8,7 +8,7 @@
 import type { RawMouseDelta, SensConfig, Vec3 } from './types';
 import { VALORANT_DEG_PER_COUNT, CM_PER_INCH, PITCH_LIMIT_DEG } from './constants';
 import { anglesToDir, clamp } from './math';
-import { applyCurve } from './rawaccel';
+import { applyCurve, observedGain } from './rawaccel';
 
 export function degreesPerCount(sens: number): number {
   return VALORANT_DEG_PER_COUNT.value * sens;
@@ -50,6 +50,20 @@ function sanitizeDtMs(dtMs: number, pollingRateHz: number): number {
   return dtMs;
 }
 
+/** Result of one mouse-delta step, carrying everything telemetry needs. */
+export interface AimStep {
+  /** Alias of `effectiveGain`, kept for call sites that only want one number. */
+  gain: number;
+  /** What this app multiplied by. 1 unless simulating a curve locally. */
+  appliedGain: number;
+  /** True count-to-degree gain, including driver-level acceleration. */
+  effectiveGain: number;
+  /** Hand speed in counts/ms with driver acceleration undone. */
+  handSpeed: number;
+  /** Speed of the counts as received, in counts/ms. */
+  observedSpeed: number;
+}
+
 export class AimController {
   yaw: number;
   pitch: number;
@@ -83,34 +97,45 @@ export class AimController {
     cfg: SensConfig,
     scoped: boolean,
     adsSensMultiplier = 1,
-  ): { gain: number } {
+  ): AimStep {
     const dtMs = Math.max(sanitizeDtMs(d.dtMs, cfg.pollingRateHz), 0.125);
     const curve = cfg.curve;
     const degPerCount = degreesPerCount(cfg.sensitivity);
 
-    let gain: number;
-    let dxDeg: number;
-    let dyDeg: number;
+    // `external` is the default because it is the real-world case: RawAccel is
+    // a driver filter, so its curve is already baked into the counts we
+    // receive. Applying it again here would accelerate twice.
+    const simulating = cfg.rawAccelEnabled && cfg.rawAccelMode === 'simulated';
+    const external = cfg.rawAccelEnabled && !simulating;
 
-    if (curve.applyToY) {
-      // "Whole" mode: the curve reacts to the combined 2D speed and reshapes
-      // both axes by the same gain, so a diagonal flick isn't sheared.
-      const inputSpeed = Math.hypot(d.dx, d.dy) / dtMs;
-      gain = cfg.rawAccelEnabled ? applyCurve(curve, inputSpeed) : 1;
-      dxDeg = d.dx * degPerCount * gain;
-      dyDeg = d.dy * degPerCount * gain;
+    // Speed of the counts as they arrived. Under `external` this is already
+    // post-acceleration; under `simulated` it is the raw hand speed.
+    const observedSpeed = (curve.applyToY ? Math.hypot(d.dx, d.dy) : Math.abs(d.dx)) / dtMs;
+
+    // What the app itself multiplies by. Always 1 unless we are simulating —
+    // this is the line that prevents double-acceleration.
+    const appliedGain = simulating ? applyCurve(curve, observedSpeed) : 1;
+
+    // What the count-to-degree relationship actually was, including anything
+    // the driver did upstream. This is the number the analyser reasons about.
+    const effectiveGain = external
+      ? observedGain(curve, observedSpeed)
+      : appliedGain;
+
+    // Hand speed in counts/ms, with the driver's acceleration undone. Lets the
+    // analyser report real physical hand distance even with accel active.
+    const handSpeed = external ? observedSpeed / (effectiveGain || 1) : observedSpeed;
+
+    let dxDeg = d.dx * degPerCount * appliedGain;
+    let dyDeg: number;
+    if (curve.applyToY || !simulating) {
+      // "Whole" mode, or any non-simulating mode: both axes share one factor,
+      // so a diagonal flick is never sheared.
+      dyDeg = d.dy * degPerCount * appliedGain;
     } else {
-      // "By Component" mode: only X drives the curve; Y is passed through
-      // at the flat sensMultiplier so vertical tracking never accelerates.
-      //
-      // Y must fall back to 1 (not sensMultiplier) when RawAccel is off,
-      // or toggling the feature would leave vertical scaled while horizontal
-      // is 1:1 -- desynced axes, and a silent break of the guarantee that
-      // RawAccel off means pure, unmodified Valorant sensitivity.
-      const inputSpeedX = Math.abs(d.dx) / dtMs;
-      gain = cfg.rawAccelEnabled ? applyCurve(curve, inputSpeedX) : 1;
-      dxDeg = d.dx * degPerCount * gain;
-      dyDeg = d.dy * degPerCount * (cfg.rawAccelEnabled ? curve.sensMultiplier : 1);
+      // Simulated "By Component": only X is accelerated; Y passes through at
+      // the flat multiplier so vertical tracking never accelerates.
+      dyDeg = d.dy * degPerCount * curve.sensMultiplier;
     }
 
     if (scoped) {
@@ -128,7 +153,7 @@ export class AimController {
     this.pitch = clamp(this.pitch, -PITCH_LIMIT_DEG.value, PITCH_LIMIT_DEG.value);
     this.yaw = wrapYaw(this.yaw);
 
-    return { gain };
+    return { gain: effectiveGain, appliedGain, effectiveGain, handSpeed, observedSpeed };
   }
 }
 

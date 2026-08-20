@@ -165,3 +165,52 @@ export function sampleCurve(curve: AccelCurve, maxSpeed: number, points: number)
   }
   return out;
 }
+
+/**
+ * Recovers the true hand speed from an already-accelerated input speed.
+ *
+ * When RawAccel runs as a driver filter (`SensConfig.rawAccelMode === 'external'`,
+ * the real-world case) the counts that reach the app have already been scaled
+ * by the curve. The speed we can measure is therefore the OUTPUT speed, not the
+ * hand speed — but the curve is defined in terms of hand speed, so evaluating
+ * it on what we measured would report the wrong gain.
+ *
+ * `outputSpeed = handSpeed * gain(handSpeed)` is monotonically increasing in
+ * handSpeed for every curve here (gain is non-decreasing and non-negative), so
+ * it inverts cleanly by bisection. There is no closed form that covers all nine
+ * curve families, and bisection converges in ~50 iterations on a value this
+ * well-behaved, which is nothing next to a frame budget.
+ *
+ * Returns the hand speed in counts/ms.
+ */
+export function invertCurve(curve: AccelCurve, outputSpeed: number): number {
+  if (!Number.isFinite(outputSpeed) || outputSpeed <= 0) return 0;
+
+  const forward = (s: number): number => s * applyCurve(curve, s);
+
+  // Expand the upper bracket until it overshoots. A gain below 1 (sensMultiplier
+  // < 1) means hand speed exceeds output speed, so we cannot assume outputSpeed
+  // is an upper bound.
+  let hi = Math.max(outputSpeed, 1e-6);
+  for (let i = 0; i < 64 && forward(hi) < outputSpeed; i++) hi *= 2;
+  if (forward(hi) < outputSpeed) return hi; // degenerate curve (gain collapsed to 0)
+
+  let lo = 0;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (forward(mid) < outputSpeed) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * The gain that a driver-level RawAccel filter applied, given the accelerated
+ * speed we observed. This is what the analyser needs: it describes how many
+ * degrees each count was worth at that instant.
+ */
+export function observedGain(curve: AccelCurve, observedSpeed: number): number {
+  const handSpeed = invertCurve(curve, observedSpeed);
+  if (handSpeed <= 0) return applyCurve(curve, 0);
+  return observedSpeed / handSpeed;
+}

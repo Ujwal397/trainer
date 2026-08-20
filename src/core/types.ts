@@ -71,7 +71,24 @@ export interface SensConfig {
   sensitivity: number;
   /** Valorant "Scoped Sensitivity Multiplier". */
   scopedMultiplier: number;
+  /** True when a RawAccel curve is in play at all (either mode below). */
   rawAccelEnabled: boolean;
+  /**
+   * How the curve relates to the mouse input we receive.
+   *
+   * - `external` (the real-world case): RawAccel is running as a driver filter
+   *   on the user's machine, so the counts that reach us are ALREADY
+   *   accelerated. The app must NOT apply the curve again — it declares the
+   *   curve so the analyser can reason about the speed-dependent gain that
+   *   was applied upstream, and recover true hand speed by inverting it.
+   * - `simulated`: no driver-level RawAccel; the app applies the curve itself
+   *   so a curve can be trialled without installing anything.
+   *
+   * Defaults to `external`. Getting this backwards double-applies
+   * acceleration and invalidates every angular measurement, so it is explicit
+   * rather than inferred.
+   */
+  rawAccelMode?: 'external' | 'simulated';
   curve: AccelCurve;
   invertY: boolean;
 }

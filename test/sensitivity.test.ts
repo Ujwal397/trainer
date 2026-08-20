@@ -208,3 +208,54 @@ describe('RawAccel disabled is pure Valorant sensitivity', () => {
     expect(Math.abs(aim.pitch)).toBeCloseTo(expected, 10);
   });
 });
+
+describe('external RawAccel is measured, not re-applied', () => {
+  const linear: AccelCurve = {
+    ...OFF_CURVE, type: 'linear', sensMultiplier: 1,
+    acceleration: 0.05, inputOffset: 0, outputCap: 0, applyToY: true,
+  };
+  const cfg = (mode: 'external' | 'simulated'): SensConfig => ({
+    dpi: 800, pollingRateHz: 1000, sensitivity: 0.35, scopedMultiplier: 1,
+    rawAccelEnabled: true, rawAccelMode: mode, invertY: false, curve: linear,
+  });
+  const fast: RawMouseDelta = { dx: 400, dy: 0, dtMs: 4, unadjusted: true };
+
+  it('does not scale the input again when the driver already did', () => {
+    const aim = new AimController();
+    aim.reset(0, 0);
+    const step = aim.applyDelta(fast, cfg('external'), false);
+
+    // Counts map 1:1 to degrees at the base sensitivity: no second helping.
+    expect(step.appliedGain).toBe(1);
+    expect(Math.abs(aim.yaw)).toBeCloseTo(400 * degreesPerCount(0.35), 10);
+  });
+
+  it('simulating the same curve DOES scale the input', () => {
+    const aim = new AimController();
+    aim.reset(0, 0);
+    const step = aim.applyDelta(fast, cfg('simulated'), false);
+
+    expect(step.appliedGain).toBeGreaterThan(1);
+    expect(Math.abs(aim.yaw)).toBeGreaterThan(400 * degreesPerCount(0.35));
+  });
+
+  it('recovers hand speed by inverting the curve', () => {
+    const aim = new AimController();
+    aim.reset(0, 0);
+    const step = aim.applyDelta(fast, cfg('external'), false);
+
+    // The driver sped the hand up, so true hand speed is below what we saw,
+    // and re-applying the curve to it must reproduce the observed speed.
+    expect(step.handSpeed).toBeLessThan(step.observedSpeed);
+    expect(step.handSpeed * step.effectiveGain).toBeCloseTo(step.observedSpeed, 6);
+  });
+
+  it('reports unit gain and identical hand speed when RawAccel is off', () => {
+    const aim = new AimController();
+    aim.reset(0, 0);
+    const step = aim.applyDelta(fast, { ...cfg('external'), rawAccelEnabled: false }, false);
+
+    expect(step.effectiveGain).toBe(1);
+    expect(step.handSpeed).toBe(step.observedSpeed);
+  });
+});
