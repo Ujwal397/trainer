@@ -87,11 +87,41 @@ export const STANDING_HITBOX: AgentHitbox = {
   eyeHeightM: EYE_HEIGHT_M.value,
   standingHeightM: STANDING_HEIGHT_M.value,
   crouchingHeightM: CROUCHING_HEIGHT_M.value,
-  // Head first: intersection tests take the first hit on a tie.
+  /**
+   * Six capsules describing an actual humanoid, head first (the first hit wins
+   * on a tie, and `raycastTarget` additionally gives the head outright
+   * priority — see the note there about overlapping caps).
+   *
+   * These are deliberately sized so the DRAWN bot fills them. A capsule is a
+   * swept sphere, so its true extent is the segment plus `radius` in every
+   * direction — easy to under-estimate, and getting it wrong is not a cosmetic
+   * problem. An earlier version used a head segment of 1.66->1.75 with radius
+   * 0.115, which is a 32 cm tall hittable head on a 1.86 m body: you could
+   * shoot a clear 8 cm above the visible skull and still be awarded a
+   * headshot. Every number below is quoted with its resulting span so that
+   * mistake is visible at a glance rather than hidden in the arithmetic.
+   *
+   * Arms are included and count as BODY damage, matching Valorant. Leaving
+   * them out meant a visible arm was a hole in the hitbox and a clean shot
+   * read as a miss — the single most jarring thing a trainer can do.
+   */
   capsules: [
-    { a: { x: 0, y: 1.66, z: 0 }, b: { x: 0, y: 1.75, z: 0 }, radius: 0.115, zone: 'head' },
-    { a: { x: 0, y: 1.02, z: 0 }, b: { x: 0, y: 1.60, z: 0 }, radius: 0.20, zone: 'body' },
-    { a: { x: 0, y: 0.06, z: 0 }, b: { x: 0, y: 1.00, z: 0 }, radius: 0.17, zone: 'leg' },
+    // Head: spans y 1.595..1.845, 0.20 m wide -> a 0.25 m head. Eye height
+    // (1.68) sits inside it, as it must.
+    { a: { x: 0, y: 1.695, z: 0 }, b: { x: 0, y: 1.745, z: 0 }, radius: 0.10, zone: 'head' },
+
+    // Torso: spans y 0.87..1.59, 0.38 m wide. The top cap now stops at the
+    // shoulder line instead of bulging up past the jaw.
+    { a: { x: 0, y: 1.06, z: 0 }, b: { x: 0, y: 1.40, z: 0 }, radius: 0.19, zone: 'body' },
+
+    // Arms: outer extent 0.31 m from centre, hanging beside the torso.
+    { a: { x: -0.25, y: 1.13, z: 0 }, b: { x: -0.25, y: 1.50, z: 0 }, radius: 0.06, zone: 'body' },
+    { a: { x: 0.25, y: 1.13, z: 0 }, b: { x: 0.25, y: 1.50, z: 0 }, radius: 0.06, zone: 'body' },
+
+    // Legs: span y 0.045..0.965, just meeting at the centreline so there is no
+    // free gap to shoot through between them.
+    { a: { x: -0.10, y: 0.15, z: 0 }, b: { x: -0.10, y: 0.86, z: 0 }, radius: 0.105, zone: 'leg' },
+    { a: { x: 0.10, y: 0.15, z: 0 }, b: { x: 0.10, y: 0.86, z: 0 }, radius: 0.105, zone: 'leg' },
   ],
 };
 
