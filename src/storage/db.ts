@@ -127,6 +127,7 @@ export interface AimTrainerDB {
   setSetting<T>(key: string, value: T): Promise<void>;
   saveProfile(profile: SensProfile): Promise<void>;
   listProfiles(): Promise<SensProfile[]>;
+  deleteProfile(id: string): Promise<void>;
 }
 
 const DB_NAME = 'valorant-aim-trainer';
@@ -199,6 +200,10 @@ class MemoryStore implements AimTrainerDB {
 
   async listProfiles(): Promise<SensProfile[]> {
     return [...this.profiles.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    this.profiles.delete(id);
   }
 }
 
@@ -279,6 +284,10 @@ class IndexedDbStore implements AimTrainerDB {
       if (isQuotaError(err)) throw new StorageQuotaError(err);
       throw err;
     }
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    await promisifyRequest(this.tx(STORE_PROFILES, 'readwrite').delete(id));
   }
 
   async listProfiles(): Promise<SensProfile[]> {

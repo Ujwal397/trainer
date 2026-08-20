@@ -114,13 +114,27 @@ describe('raycastTarget', () => {
     expect(hit!.zone).toBe('head');
   });
 
-  it('picks the nearer capsule when hits are not tied', () => {
+  it('gives the head priority even when a body capsule is struck first', () => {
+    // Real agent capsules overlap: the body capsule's upper cap bulges above
+    // the base of the head capsule, so a ray aimed dead at the head centre
+    // enters the body sphere first. Valorant scores that as a headshot, and so
+    // must we -- otherwise the player's most precise shots get recorded as
+    // their least precise ones.
     const capsules: Capsule[] = [
       { a: { x: 0, y: 0, z: 10 }, b: { x: 0, y: 1, z: 10 }, radius: 0.5, zone: 'head' },
       { a: { x: 0, y: 0, z: 3 }, b: { x: 0, y: 1, z: 3 }, radius: 0.5, zone: 'body' },
     ];
     const hit = raycastTarget({ x: 0, y: 0.5, z: 0 }, { x: 0, y: 0, z: 1 }, 't1', capsules);
-    expect(hit!.zone).toBe('body');
+    expect(hit!.zone).toBe('head');
+  });
+
+  it('still picks the nearer capsule among non-head zones', () => {
+    const capsules: Capsule[] = [
+      { a: { x: 0, y: 0, z: 10 }, b: { x: 0, y: 1, z: 10 }, radius: 0.5, zone: 'body' },
+      { a: { x: 0, y: 0, z: 3 }, b: { x: 0, y: 1, z: 3 }, radius: 0.5, zone: 'leg' },
+    ];
+    const hit = raycastTarget({ x: 0, y: 0.5, z: 0 }, { x: 0, y: 0, z: 1 }, 't1', capsules);
+    expect(hit!.zone).toBe('leg');
     expect(hit!.distanceM).toBeCloseTo(2.5, 6);
   });
 

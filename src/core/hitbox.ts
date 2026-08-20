@@ -109,6 +109,20 @@ export function transformHitbox(hb: AgentHitbox, pos: Vec3, yawDeg: number, crou
  * contractually head-first, a plain strict-less-than comparison is enough
  * to prefer a headshot over a body/leg shot that resolves to the same t.
  */
+/**
+ * Nearest hit across a target's capsules, with head priority.
+ *
+ * Head priority is not a nicety — it is required for correctness. Capsules are
+ * swept spheres, so the body capsule's upper cap bulges to roughly y=1.80,
+ * above the base of the head capsule at y=1.545. A ray aimed exactly at the
+ * head centre therefore enters the body's sphere *first* and a pure
+ * nearest-hit rule scores it as a body shot, which is both wrong against how
+ * Valorant registers the same shot and quietly destructive here: the analyser
+ * would see the player's most precise shots recorded as their least precise.
+ *
+ * So: if the ray intersects the head at all, it is a headshot. Otherwise the
+ * nearest of the remaining zones wins.
+ */
 export function raycastTarget(
   origin: Vec3,
   dir: Vec3,
@@ -117,14 +131,23 @@ export function raycastTarget(
 ): RayHit | null {
   let best: RayHit | null = null;
   let bestT = Infinity;
+  let head: RayHit | null = null;
+  let headT = Infinity;
+
   for (const cap of capsules) {
     const t = rayCapsule(origin, dir, cap);
-    if (t !== null && t < bestT) {
+    if (t === null) continue;
+    if (cap.zone === 'head') {
+      if (t < headT) {
+        headT = t;
+        head = { targetId, zone: 'head', point: add(origin, scale(dir, t)), distanceM: t };
+      }
+    } else if (t < bestT) {
       bestT = t;
       best = { targetId, zone: cap.zone, point: add(origin, scale(dir, t)), distanceM: t };
     }
   }
-  return best;
+  return head ?? best;
 }
 
 /** Midpoint of the head capsule - the analyser's aim-error reference point. */
