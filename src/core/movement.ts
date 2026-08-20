@@ -48,6 +48,21 @@ function approachAxis(current: number, target: number, rate: number, dtSec: numb
   return current + Math.sign(diff) * maxStep;
 }
 
+/**
+ * Ramps one velocity axis toward `target` under Valorant's accel/decel rates.
+ *
+ * Exported so bot movement runs through the SAME physics the player does.
+ * Bots that snap instantly between +full and -full speed are not merely
+ * "hard" — they are performing a movement the game cannot express, so the
+ * tracking skill they train does not transfer. Sharing this function is what
+ * guarantees a bot's strafe is a strafe a human could actually perform.
+ */
+export function approachSpeed(current: number, target: number, speedCap: number, dtSec: number): number {
+  const accelRate = speedCap / (ACCEL_TIME_MS.value / 1000);
+  const decelRate = speedCap / (STOP_TIME_MS.value / 1000);
+  return approachAxis(current, target, axisRate(current, target, accelRate, decelRate), dtSec);
+}
+
 export class MoveState {
   position: Vec3;
   velocity: Vec3;

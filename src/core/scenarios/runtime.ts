@@ -11,10 +11,10 @@ import type {
 import {
   BASE_HEALTH, HEAVY_SHIELD, RUN_SPEED_MS, STANDING_HITBOX, STOP_TIME_MS,
 } from '../constants';
-import { clamp, cross, distance, normalize, scale, sub, v3 } from '../math';
+import { clamp, cross, normalize, scale, sub, v3 } from '../math';
 import { applyDamage } from '../damage';
 import type { Rng } from '../rng';
-import type { AABB } from '../movement';
+import { approachSpeed, type AABB } from '../movement';
 
 export interface RuntimeEnv {
   colliders: readonly AABB[];
@@ -27,6 +27,13 @@ export interface DamageOutcome {
   /** Damage actually absorbed, after clamping to what the target had left. */
   applied: number;
 }
+
+/**
+ * Movement speed factor for a bot carrying a rifle, relative to base run
+ * speed. Approximate — Riot does not publish per-weapon movement speeds — but
+ * duelling a bot moving at unencumbered sprint speed trains the wrong timing.
+ */
+const RIFLE_SPEED_FACTOR = 0.9;
 
 /** Radius used to keep spawns clear of geometry, roughly a body capsule. */
 const SPAWN_CLEARANCE_M = 0.45;
@@ -187,7 +194,13 @@ export class ScenarioRuntime {
       visibleAt: null,
       expiresAt: this.def.targetLifetimeSec > 0 ? nowMs + this.def.targetLifetimeSec * 1000 : null,
       behavior,
-      phase: this.rng.range(0, Math.PI * 2),
+      // Sinusoidal strafers start at +/-pi/2, where cos (and therefore
+      // velocity) is zero: a target must ease out from rest like a player
+      // would, not blink into existence already at full sprint. Other
+      // behaviours ramp through approachSpeed, so their phase can be free.
+      phase: behavior.type === 'strafe'
+        ? (this.rng.next() < 0.5 ? Math.PI / 2 : -Math.PI / 2)
+        : this.rng.range(0, Math.PI * 2),
       hitbox: this.hitbox,
     };
 
@@ -239,13 +252,53 @@ export class ScenarioRuntime {
     while (this.targets.length < this.def.targetCount) this.spawnOne(nowMs);
   }
 
+  /**
+   * Drives one target's behaviour.
+   *
+   * Every moving behaviour sets a WISH velocity and then ramps the real
+   * velocity toward it with `approachSpeed` — the same accel/decel curve the
+   * player is subject to. Writing velocity directly (as this used to) let bots
+   * flip from full-speed-left to full-speed-right within a single 4 ms step,
+   * which is not a movement Valorant can produce: measured, the old jiggle bot
+   * changed direction 6.5 times a second while never once dropping below full
+   * run speed. Tracking that is not a skill that transfers to the game.
+   */
   private stepBehavior(t: TargetState, nowMs: number, dtSec: number): void {
     const a = this.anchors.get(t.id);
     if (!a) return;
 
     const b = t.behavior;
-    const speed = b.speed ?? RUN_SPEED_MS.value;
+    // Default to rifle-carrying speed rather than base run speed: a bot you
+    // duel is holding a weapon, and that is the speed it would actually move.
+    const speed = b.speed ?? RUN_SPEED_MS.value * RIFLE_SPEED_FACTOR;
     const amp = b.amplitudeM ?? 3;
+
+    /** Signed offset from the anchor along the strafe axis, metres. */
+    const offsetAlongAxis = (): number =>
+      (t.position.x - a.origin.x) * a.lateral.x + (t.position.z - a.origin.z) * a.lateral.z;
+
+    /** Ramps toward a wish velocity along the lateral axis and integrates. */
+    const driveAlongAxis = (wishSpeed: number): void => {
+      const wishX = a.lateral.x * wishSpeed;
+      const wishZ = a.lateral.z * wishSpeed;
+      t.velocity.x = approachSpeed(t.velocity.x, wishX, speed, dtSec);
+      t.velocity.z = approachSpeed(t.velocity.z, wishZ, speed, dtSec);
+      t.position.x += t.velocity.x * dtSec;
+      t.position.z += t.velocity.z * dtSec;
+    };
+
+    /**
+     * Turns the bot around at the edge of its band, but only while it is
+     * still travelling outward. Flipping on distance alone re-triggered every
+     * step for as long as the target sat beyond the boundary, so it juddered
+     * on the spot instead of turning cleanly.
+     */
+    const turnAtEdge = (): void => {
+      const offset = offsetAlongAxis();
+      if (Math.abs(offset) <= amp) return;
+      const movingOutward = Math.sign(offset) === Math.sign(a.dir);
+      if (movingOutward) a.dir = -a.dir;
+    };
 
     switch (b.type) {
       case 'static':
@@ -254,11 +307,11 @@ export class ScenarioRuntime {
         return;
 
       case 'strafe': {
-        // Smooth sinusoid: continuous velocity, so tracking is a test of
-        // steadiness rather than of reacting to instantaneous flips.
+        // Smooth sinusoid: continuous velocity by construction, so this one
+        // needs no ramping — it never contains a discontinuity to begin with.
         t.phase += (speed / Math.max(amp, 0.1)) * dtSec;
         const offset = Math.sin(t.phase) * amp;
-        const vel = Math.cos(t.phase) * amp * (speed / Math.max(amp, 0.1));
+        const vel = Math.cos(t.phase) * speed;
         t.position.x = a.origin.x + a.lateral.x * offset;
         t.position.z = a.origin.z + a.lateral.z * offset;
         t.velocity.x = a.lateral.x * vel;
@@ -267,39 +320,33 @@ export class ScenarioRuntime {
       }
 
       case 'counter-strafe': {
-        // Full speed, then a dead stop held for STOP_TIME_MS — the real
-        // Valorant mechanic, where the stop is what makes the shot accurate.
+        // Run, then a hard stop held for STOP_TIME_MS — the real Valorant
+        // mechanic, where the stop is what makes the bot's own shot accurate.
         if (nowMs >= a.nextChangeAt) {
           a.dir = -a.dir;
-          a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.9) * 1000;
+          a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.9) * 1000 * this.rng.range(0.85, 1.15);
           a.exposedUntil = nowMs + STOP_TIME_MS.value;
         }
         const stopped = nowMs < a.exposedUntil;
-        const v = stopped ? 0 : speed * a.dir;
-        t.velocity.x = a.lateral.x * v;
-        t.velocity.z = a.lateral.z * v;
-        t.position.x += t.velocity.x * dtSec;
-        t.position.z += t.velocity.z * dtSec;
-        // Turn around at the edge of the strafe band rather than wandering off.
-        if (distance({ x: t.position.x, y: 0, z: t.position.z }, { x: a.origin.x, y: 0, z: a.origin.z }) > amp) {
-          a.dir = -a.dir;
-        }
+        driveAlongAxis(stopped ? 0 : speed * a.dir);
+        turnAtEdge();
         return;
       }
 
       case 'jiggle': {
+        // A jiggle peek is a short dash followed by a STOP, not a continuous
+        // bounce: the player breaks the angle, holds a beat, then breaks back.
+        // The stop is the whole point — it is the window you are meant to
+        // punish — so modelling this as an uninterrupted oscillation removed
+        // the very thing the scenario exists to train.
         if (nowMs >= a.nextChangeAt) {
           a.dir = -a.dir;
-          a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.28) * 1000 * this.rng.range(0.7, 1.3);
+          a.exposedUntil = nowMs + this.rng.range(110, 260); // dwell at the end of the dash
+          a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.55) * 1000 * this.rng.range(0.85, 1.2);
         }
-        const v = speed * a.dir;
-        t.velocity.x = a.lateral.x * v;
-        t.velocity.z = a.lateral.z * v;
-        t.position.x += t.velocity.x * dtSec;
-        t.position.z += t.velocity.z * dtSec;
-        if (distance({ x: t.position.x, y: 0, z: t.position.z }, { x: a.origin.x, y: 0, z: a.origin.z }) > amp) {
-          a.dir = -a.dir;
-        }
+        const dwelling = nowMs < a.exposedUntil;
+        driveAlongAxis(dwelling ? 0 : speed * a.dir);
+        if (!dwelling) turnAtEdge();
         return;
       }
 
@@ -313,12 +360,11 @@ export class ScenarioRuntime {
           a.exposedUntil = nowMs + (a.hidden ? this.rng.range(500, 2000) : exposure);
         }
         const goal = a.hidden ? -amp : 0;
-        const cur = (t.position.x - a.origin.x) * a.lateral.x + (t.position.z - a.origin.z) * a.lateral.z;
-        const step = clamp(goal - cur, -speed * dtSec, speed * dtSec);
-        t.position.x += a.lateral.x * step;
-        t.position.z += a.lateral.z * step;
-        t.velocity.x = (a.lateral.x * step) / Math.max(dtSec, 1e-6);
-        t.velocity.z = (a.lateral.z * step) / Math.max(dtSec, 1e-6);
+        const remaining = goal - offsetAlongAxis();
+        // Ease into the stop so a peeker settles onto its angle instead of
+        // arriving at full speed and halting dead.
+        const wish = clamp(remaining / Math.max(dtSec, 1e-6), -speed, speed);
+        driveAlongAxis(wish);
         return;
       }
 
@@ -328,22 +374,20 @@ export class ScenarioRuntime {
           a.lateral = { x: Math.sin(angle), y: 0, z: Math.cos(angle) };
           a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.7) * 1000 * this.rng.range(0.6, 1.4);
         }
-        const v = speed * this.rng.range(0.55, 1);
-        const next = {
-          x: t.position.x + a.lateral.x * v * dtSec,
-          y: t.position.y,
-          z: t.position.z + a.lateral.z * v * dtSec,
-        };
+        const wish = speed * this.rng.range(0.55, 1);
+        const nextX = t.position.x + approachSpeed(t.velocity.x, a.lateral.x * wish, speed, dtSec) * dtSec;
+        const nextZ = t.position.z + approachSpeed(t.velocity.z, a.lateral.z * wish, speed, dtSec) * dtSec;
         // Walk into a wall and pick a new heading instead of clipping through.
-        if (pointInsideAny({ x: next.x, y: 1.0, z: next.z }, this.env.colliders, SPAWN_CLEARANCE_M)) {
+        if (pointInsideAny({ x: nextX, y: 1.0, z: nextZ }, this.env.colliders, SPAWN_CLEARANCE_M)) {
           a.nextChangeAt = nowMs;
           t.velocity.x = 0;
           t.velocity.z = 0;
           return;
         }
-        t.velocity.x = a.lateral.x * v;
-        t.velocity.z = a.lateral.z * v;
-        t.position = next;
+        t.velocity.x = approachSpeed(t.velocity.x, a.lateral.x * wish, speed, dtSec);
+        t.velocity.z = approachSpeed(t.velocity.z, a.lateral.z * wish, speed, dtSec);
+        t.position.x = nextX;
+        t.position.z = nextZ;
         return;
       }
     }
