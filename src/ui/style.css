@@ -733,3 +733,26 @@ a { color: var(--accent-2); }
   .results-hero { flex-direction: column; align-items: flex-start; gap: var(--space-4); }
   .analyzer-headline { flex-direction: column; align-items: flex-start; }
 }
+
+/* ---------------------------------------------------------------- in-game */
+
+/*
+ * The game host must size itself from the viewport, never from its contents.
+ * Left as a plain block element its height is derived from the canvas inside
+ * it, while the renderer sizes that canvas from the host — a circular
+ * dependency that settles at the canvas's default 150px and squashes the 3D
+ * view into a strip at the top of the screen.
+ */
+.game-host {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #000;
+}
+
+/* Canvases are inline by default, which leaves a baseline gap under them. */
+.game-host canvas {
+  display: block;
+}

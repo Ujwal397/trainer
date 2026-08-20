@@ -25,9 +25,17 @@ const MARKER_END_SCALE = 0.5;
 
 const SIM_STEP_S = SIM_STEP_MS / 1000;
 
-/** Per-mode, per-zone base colour. Kept subtle in `humanoid` so the head zone reads without becoming a beacon. */
+/**
+ * Per-mode, per-zone base colour.
+ *
+ * `humanoid` values are light enough to read clearly against the dark maps,
+ * but the three zones are deliberately close together: if the head were a
+ * distinct colour the player would acquire it by hue instead of by reading the
+ * silhouette, which is not the skill Valorant asks for. Zone contrast belongs
+ * in `wireframe`, which exists precisely for that.
+ */
 const MODE_COLOR: Record<VisualMode, Record<HitZone, number>> = {
-  humanoid: { head: 0x3a4a52, body: 0x293a41, leg: 0x212e33 },
+  humanoid: { head: 0x9aa4ae, body: 0x8b949e, leg: 0x6b737c },
   capsule: { head: 0x9aa0a8, body: 0x9aa0a8, leg: 0x9aa0a8 },
   // Classic debug palette: head/body/leg unmistakably distinct at a glance.
   wireframe: { head: 0xff4655, body: 0x53e6a8, leg: 0x4fa8ff },
