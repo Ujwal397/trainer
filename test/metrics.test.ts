@@ -148,11 +148,9 @@ describe('bucketBySensitivity', () => {
 
   it('marks thin buckets unreliable rather than trusting them silently', () => {
     const sessions = [makeSession({ sensitivity: 0.3, accuracy: 0.9, avgErrorDeg: 1, overshootBias: 0, shots: 3 })];
-    const buckets = bucketBySensitivity(sessions, { minShotsPerBucket: 20 }) as (typeof sessions extends never
-      ? never
-      : ReturnType<typeof bucketBySensitivity>[number] & { reliable: boolean })[];
+    const buckets = bucketBySensitivity(sessions, { minShotsPerBucket: 20 }) as SensBucketWithReliability[];
     expect(buckets[0].shots).toBe(3);
-    expect((buckets[0] as unknown as { reliable: boolean }).reliable).toBe(false);
+    expect(buckets[0].reliable).toBe(false);
   });
 
   it('excludeUnreliable drops thin buckets from the result', () => {
