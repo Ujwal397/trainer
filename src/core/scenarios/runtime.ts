@@ -30,10 +30,25 @@ export interface DamageOutcome {
 
 /**
  * Movement speed factor for a bot carrying a rifle, relative to base run
- * speed. Approximate — Riot does not publish per-weapon movement speeds — but
- * duelling a bot moving at unencumbered sprint speed trains the wrong timing.
+ * speed. 0.8 of the 6.75 m/s base puts a rifle bot at ~5.4 m/s, the
+ * community-cited Valorant rifle movement speed. Approximate — Riot does not
+ * publish per-weapon movement speeds — but duelling a bot moving at
+ * unencumbered sprint speed trains the wrong timing.
  */
-const RIFLE_SPEED_FACTOR = 0.9;
+const RIFLE_SPEED_FACTOR = 0.8;
+
+/**
+ * How long a counter-strafing bot holds still after stopping.
+ *
+ * STOP_TIME_MS alone is only the deceleration — the handful of milliseconds it
+ * takes to shed velocity. A player who counter-strafes does not instantly
+ * sprint back the other way; they stop to actually fire, which takes a few
+ * hundred milliseconds. Without this dwell the bot reverses at full speed
+ * roughly once per second forever, which no human can do and which trains the
+ * player to expect a target that is never actually shootable.
+ */
+const SETTLE_MIN_MS = 240;
+const SETTLE_MAX_MS = 520;
 
 /** Radius used to keep spawns clear of geometry, roughly a body capsule. */
 const SPAWN_CLEARANCE_M = 0.45;
@@ -320,16 +335,21 @@ export class ScenarioRuntime {
       }
 
       case 'counter-strafe': {
-        // Run, then a hard stop held for STOP_TIME_MS — the real Valorant
-        // mechanic, where the stop is what makes the bot's own shot accurate.
+        // Strafe, stop dead, HOLD, then break the other way. The hold is the
+        // shootable window and the whole point of the duel: it is what the
+        // player is meant to punish, and it is what makes the bot's own shot
+        // accurate in Valorant's first-shot model.
         if (nowMs >= a.nextChangeAt) {
           a.dir = -a.dir;
-          a.nextChangeAt = nowMs + (b.changeIntervalSec ?? 0.9) * 1000 * this.rng.range(0.85, 1.15);
-          a.exposedUntil = nowMs + STOP_TIME_MS.value;
+          // Decelerate, then dwell — the run phase only begins after both.
+          a.exposedUntil = nowMs + STOP_TIME_MS.value + this.rng.range(SETTLE_MIN_MS, SETTLE_MAX_MS);
+          a.nextChangeAt = a.exposedUntil + (b.changeIntervalSec ?? 0.9) * 1000 * this.rng.range(0.85, 1.15);
         }
         const stopped = nowMs < a.exposedUntil;
         driveAlongAxis(stopped ? 0 : speed * a.dir);
-        turnAtEdge();
+        // Only turn while actually running, for the same reason as jiggle:
+        // re-triggering the flip while parked at the edge causes a judder.
+        if (!stopped) turnAtEdge();
         return;
       }
 

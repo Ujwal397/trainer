@@ -175,7 +175,7 @@ export const SCENARIOS: ScenarioDef[] = [
     targetCount: 1,
     minDistanceM: 10,
     maxDistanceM: 20,
-    behavior: { type: 'counter-strafe', amplitudeM: 2.2, sharpness: 1, changeIntervalSec: 0.95 },
+    behavior: { type: 'counter-strafe', amplitudeM: 2.0, sharpness: 1, changeIntervalSec: 0.7 },
     targetLifetimeSec: 0,
     oneShotKill: false,
     playerMovement: true,
